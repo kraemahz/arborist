@@ -51,8 +51,9 @@ class ActionsThread(Thread):
         data = {"name": name, "description": description, "private": private}
         response = requests.post(url, headers=headers, json=data)
 
-        if response.status_code != 200:
-            _log.error("Failed to create repository %s", name)
+        if response.status_code >= 300:
+            _log.error("Failed to create repository %s\n%s\n%s",
+                       name, response.status_code, response.content)
             return None
 
         response = response.json()
@@ -82,7 +83,13 @@ def git_setup(name, full_name, setup_types):
         try:
             check_call(["git", "init"], cwd=abs_path)
         except CalledProcessError:
-            _log.error("Failed to git init repository %s", name)
+            _log.error("Failed to git init repository %s", full_name)
+            return None
+
+        try:
+            check_call(["git", "branch", "-M", "main"], cwd=abs_path)
+        except CalledProcessError:
+            _log.error("Failed to git set branch to main %s", full_name)
             return None
 
         try:
@@ -109,7 +116,7 @@ def git_setup(name, full_name, setup_types):
                 return None
 
         try:
-            check_call(["git", "push", "origin", "main"], cwd=abs_path)
+            check_call(["git", "push", "-u", "origin", "main"], cwd=abs_path)
         except CalledProcessError:
             _log.error("Failed to git push %s", full_name)
             return None
