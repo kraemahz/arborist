@@ -2,7 +2,47 @@
 requires = ["setuptools>=46.1.0", "setuptools_scm[toml]>=5"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools_scm]
-# For smarter version schemes and other configuration options,
-# check out https://github.com/pypa/setuptools_scm
-version_scheme = "no-guess-dev"
+[project]
+name = "arborist"
+description = "Github Application Server"
+authors = [{name = "Teague Lasser", email = "teague@subseq.io"}]
+license = {file = "LICENSE.txt"}
+readme = "README.md"
+classifiers = [
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+version = "0.1.0"
+dependencies = [
+    "prism-client==0.2.1",
+    "requests>=2.25,<3.0",
+]
+
+[project.scripts]
+arborist = "arborist.cli:cli"
+
+[project.urls]
+Homepage = 'https://github.com/kraemahz/arborist'
+Source = 'https://github.com/kraemahz/arborist'
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["arborist"]
+
+[tool.flake8]
+max-line-length = 88
+extend-ignore = ["E203", "W503"]
+exclude = [
+    ".tox",
+    "build",
+    "dist",
+    ".eggs",
+    "docs/conf.py",
+]
+
+[tool.pytest.ini_options]
+norecursedirs = [
+    "dist",
+    "build",
+    ".tox",
+]
+testpaths = ["tests"]
