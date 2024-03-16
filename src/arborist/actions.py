@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
-from .event import push_job_result, SECRET_CREATED_BEAM
+from .event import push_job_result, REPO_CREATED_BEAM, SECRET_CREATED_BEAM
 
 QUEUE_GET_TIMEOUT = 3.0
 _log = logging.getLogger(__name__)
@@ -51,10 +51,10 @@ class ActionsThread(Thread):
 
             project = Project.from_dict(next_item)
 
-            full_name = self.create_repo(project)
+            repo = self.create_repo(project)
             public_key, private_key = generate_key_pair()
-            self.add_deploy_key_to_repo(full_name, public_key)
-            self.store_private_key(full_name, private_key)
+            self.add_deploy_key_to_repo(repo.full_name, public_key)
+            self.store_private_key(repo.full_name, private_key)
 
     def store_private_key(self, full_name, private_key):
         secret_name = "key-" + full_name.replace('/', '-')
@@ -87,6 +87,10 @@ class ActionsThread(Thread):
         response = response.json()
         full_name = response["full_name"]
         self.git_setup(repo_name, full_name, setup_types)
+
+        repo = Repo(full_name)
+        push_job_result(self.client, repo, REPO_CREATED_BEAM)
+        return repo
 
     def add_deploy_key_to_repo(self, full_name: str, public_key: str) -> Dict:
         url = f"https://api.github.com/repos/{full_name}/keys"
@@ -179,6 +183,11 @@ def git_setup(name, full_name, setup_types):
 
 def setup_default(path: Path, setup_type: str):
     pass
+
+
+@dataclass
+class Repo:
+    full_name: str
 
 
 @dataclass

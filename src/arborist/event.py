@@ -9,7 +9,8 @@ from prism import Client, Wavelet
 
 _log = logging.getLogger(__name__)
 
-SECRET_CREATED_BEAM = "urn:subseq.io:secrets:private-key:created"
+SECRET_CREATED_BEAM = "urn:subseq.io:repos:private-key:created"
+REPO_CREATED_BEAM = "urn:subseq.io:repos:repo:created"
 
 
 @dataclass
