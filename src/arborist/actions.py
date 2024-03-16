@@ -8,13 +8,15 @@ from tempfile import TemporaryDirectory
 from threading import Thread
 from typing import Dict, List, Self
 
+import requests
+
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
-import requests
+from .event import push_job_result, SECRET_CREATED_BEAM
 
 QUEUE_GET_TIMEOUT = 3.0
 _log = logging.getLogger(__name__)
@@ -56,11 +58,9 @@ class ActionsThread(Thread):
 
     def store_private_key(self, full_name, private_key):
         secret_name = "key-" + full_name.replace('/', '-')
-        create_secret(
-            namespace=self.conf.kubernetes_namespace,
-            name=secret_name,
-            data={"private-key": private_key}
-        )
+        new_secret = Secret(self.conf.kubernetes_namespace, secret_name)
+        new_secret.create(data={"private-key": private_key})
+        push_job_result(self.client, new_secret, SECRET_CREATED_BEAM)
 
     def create_repo(self, project: Project) -> Dict:
         private = self.conf.private
@@ -88,10 +88,7 @@ class ActionsThread(Thread):
         full_name = response["full_name"]
         self.git_setup(repo_name, full_name, setup_types)
 
-    def add_deploy_key_to_repo(self,
-                               full_name: str,
-                               public_key: str) -> Dict:
-
+    def add_deploy_key_to_repo(self, full_name: str, public_key: str) -> Dict:
         url = f"https://api.github.com/repos/{full_name}/keys"
         headers = {"Authorization": f"token {self.token}",
                    "Accept": "application/vnd.github.v3+json"}
@@ -180,23 +177,28 @@ def git_setup(name, full_name, setup_types):
             return None
 
 
-def create_secret(namespace: str, name: str, data: dict):
-    config.load_incluster_config()
-    api_instance = client.CoreV1Api()
-    body = client.V1Secret(
-        metadata=client.V1ObjectMeta(name=name),
-        string_data=data  # Data should be a dictionary with key-value pairs
-    )
-    try:
-        api_response = api_instance.create_namespaced_secret(namespace, body)
-        _log.info(f"Secret created. Name: {name}")
-        return api_response
-    except ApiException as e:
-        _log.error(f"Exception when calling create_namespaced_secret: {e}")
-
-
 def setup_default(path: Path, setup_type: str):
     pass
+
+
+@dataclass
+class Secret:
+    namespace: str
+    name: str
+
+    def create(self, data: dict):
+        config.load_incluster_config()
+        api_instance = client.CoreV1Api()
+        body = client.V1Secret(
+            metadata=client.V1ObjectMeta(name=self.name),
+            string_data=data  # Data should be a dictionary with key-value pairs
+        )
+        try:
+            api_response = api_instance.create_namespaced_secret(self.namespace, body)
+            _log.info(f"Secret created. Name: {self.name}")
+            return api_response
+        except ApiException as e:
+            _log.error(f"Exception when calling create_namespaced_secret: {e}")
 
 
 @dataclass
