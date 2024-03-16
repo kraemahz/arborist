@@ -6,7 +6,13 @@ from queue import Empty
 from subprocess import check_call, CalledProcessError
 from tempfile import TemporaryDirectory
 from threading import Thread
-from typing import Dict, List
+from typing import Dict, List, Self
+
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from kubernetes import client, config
+from kubernetes.client.rest import ApiException
 
 import requests
 
@@ -14,13 +20,24 @@ QUEUE_GET_TIMEOUT = 3.0
 _log = logging.getLogger(__name__)
 
 
+@dataclass
+class Project:
+    name: str
+    description: str
+
+    @classmethod
+    def from_dict(cls, source: Dict) -> Self:
+        return cls(source["name"], source["description"])
+
+
 class ActionsThread(Thread):
 
-    def __init__(self, client, queue, token):
+    def __init__(self, client, queue, token, conf):
         super().__init__()
         self.client = client
         self.queue = queue
         self.token = token
+        self.conf = conf
         self.running = True
 
     def run(self):
@@ -30,49 +47,90 @@ class ActionsThread(Thread):
             except Empty:
                 continue
 
-            action = Action.from_dict(next_item)
-            if action.action_type == "CreateRepo":
-                self.create_repo(**action.action_content)
-            elif action.action_type == "AddDeployKey":
-                self.add_deploy_key_to_repo(**action.action_content)
+            project = Project.from_dict(next_item)
 
-    def create_repo(self,
-                    name: str,
-                    description: str,
-                    private: bool,
-                    org: None | str,
-                    setup_types: List) -> Dict:
+            full_name = self.create_repo(project)
+            public_key, private_key = generate_key_pair()
+            self.add_deploy_key_to_repo(full_name, public_key)
+            self.store_private_key(full_name, private_key)
+
+    def store_private_key(self, full_name, private_key):
+        secret_name = "key-" + full_name.replace('/', '-')
+        create_secret(
+            namespace=self.conf.kubernetes_namespace,
+            name=secret_name,
+            data={"private-key": private_key}
+        )
+
+    def create_repo(self, project: Project) -> Dict:
+        private = self.conf.private
+        org = self.conf.org
+        setup_types = ([] if self.conf.setup_types is None
+                       else self.conf.setup_types)
         url = ("https://api.github.com/user/repos"
                if org is None else
                f"https://api.github.com/orgs/{org}/repos")
         headers = {"Authorization": f"token {self.token}",
                    "Accept": "application/vnd.github.v3+json"}
 
-        data = {"name": name, "description": description, "private": private}
+        repo_name = to_repo_name(project.name)
+        data = {"name": repo_name,
+                "description": project.description,
+                "private": private}
         response = requests.post(url, headers=headers, json=data)
 
         if response.status_code >= 300:
             _log.error("Failed to create repository %s\n%s\n%s",
-                       name, response.status_code, response.content)
+                       repo_name, response.status_code, response.content)
             return None
 
         response = response.json()
         full_name = response["full_name"]
-        self.git_setup(name, full_name, setup_types)
+        self.git_setup(repo_name, full_name, setup_types)
 
     def add_deploy_key_to_repo(self,
-                               owner: str,
-                               repo: str,
-                               key_title: str,
-                               public_key: str,
-                               read_only: bool) -> Dict:
+                               full_name: str,
+                               public_key: str) -> Dict:
 
-        url = f"https://api.github.com/repos/{owner}/{repo}/keys"
+        url = f"https://api.github.com/repos/{full_name}/keys"
         headers = {"Authorization": f"token {self.token}",
                    "Accept": "application/vnd.github.v3+json"}
-        data = {"title": key_title, "key": public_key, "read_only": read_only}
+        data = {"title": self.conf.key_title,
+                "key": public_key,
+                "read_only": False}
         response = requests.post(url, headers=headers, json=data)
         return response.json()
+
+
+def to_repo_name(name: str) -> str:
+    return name.lower().replace(" ", "_")
+
+
+def generate_key_pair() -> (str, str):
+    # Generate a private key
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=4096,
+        backend=default_backend()
+    )
+
+    # Generate the public key
+    public_key = private_key.public_key()
+
+    # Convert the private key to its PEM format
+    pem_private_key = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
+    ).decode('utf-8')
+
+    # Convert the public key to its PEM format
+    pem_public_key = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    ).decode('utf-8')
+
+    return pem_public_key, pem_private_key
 
 
 def git_setup(name, full_name, setup_types):
@@ -122,16 +180,41 @@ def git_setup(name, full_name, setup_types):
             return None
 
 
+def create_secret(namespace: str, name: str, data: dict):
+    config.load_incluster_config()
+    api_instance = client.CoreV1Api()
+    body = client.V1Secret(
+        metadata=client.V1ObjectMeta(name=name),
+        string_data=data  # Data should be a dictionary with key-value pairs
+    )
+    try:
+        api_response = api_instance.create_namespaced_secret(namespace, body)
+        _log.info(f"Secret created. Name: {name}")
+        return api_response
+    except ApiException as e:
+        _log.error(f"Exception when calling create_namespaced_secret: {e}")
+
+
 def setup_default(path: Path, setup_type: str):
     pass
 
 
 @dataclass
-class Action:
-    action_type: str
-    action_content: dict
+class ActionsConfig:
+    private: bool
+    key_title: str
+    kubernetes_namespace: str
+    org: str | None
+    setup_types: List[str] | None
 
-    @classmethod
-    def from_dict(cls, action: dict):
-        for key, value in action.items():
-            return cls(key, value)
+    def __init__(self,
+                 private: bool,
+                 key_title: str,
+                 kubernetes_namespace: str,
+                 org: str | None = None,
+                 setup_types: List[str] | None = None):
+        self.private = private
+        self.key_title = key_title
+        self.kubernetes_namespace = kubernetes_namespace
+        self.org = org
+        self.setup_types = setup_types

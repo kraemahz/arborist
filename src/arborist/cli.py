@@ -10,7 +10,7 @@ from queue import Queue
 
 from arborist import __version__
 from arborist.event import PrismConfig, connect_to_event_listener
-from arborist.actions import ActionsThread
+from arborist.actions import ActionsConfig, ActionsThread
 
 __author__ = "Teague Lasser"
 __copyright__ = "Teague Lasser"
@@ -59,9 +59,11 @@ def setup_logging(loglevel):
 @dataclass
 class Config:
     prism: PrismConfig
+    actions: ActionsConfig
 
-    def __init__(self, prism):
+    def __init__(self, prism, actions):
         self.prism = PrismConfig(**prism)
+        self.actions = ActionsConfig(**actions)
 
 
 def main(args):
@@ -73,7 +75,7 @@ def main(args):
     client = connect_to_event_listener(config.prism, queue)
     token = os.getenv('ARBORIST_GITHUB_TOKEN')
     assert token is not None, "ARBORIST_GITHUB_TOKEN token must be set"
-    thread = ActionsThread(client, queue, token)
+    thread = ActionsThread(client, queue, token, config.actions)
     thread.start()
 
     try:

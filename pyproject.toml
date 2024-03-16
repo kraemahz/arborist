@@ -13,6 +13,8 @@ classifiers = [
 ]
 version = "0.1.0"
 dependencies = [
+    "cryptography",
+    "kubernetes",
     "prism-client==0.2.1",
     "requests>=2.25,<3.0",
 ]
