@@ -44,6 +44,7 @@ class ActionsThread(Thread):
         self.queue = queue
         self.token = token
         self.conf = conf
+        self.user_name = self.get_user_info()
         self.running = True
 
     def run(self):
@@ -71,6 +72,16 @@ class ActionsThread(Thread):
         new_secret.create(data={"private-key": private_key})
         push_job_result(self.client, new_secret, SECRET_CREATED_BEAM)
 
+    def get_user_info(self):
+        url = 'https://api.github.com/user'
+        headers = {
+            'Authorization': f'token {self.token}',
+            'Accept': 'application/vnd.github.v3+json',
+        }
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        return response.json().get('name')
+
     def create_repo(self, project: Project) -> Dict:
         private = self.conf.private
         org = self.conf.org
@@ -89,8 +100,22 @@ class ActionsThread(Thread):
         response = requests.post(url, headers=headers, json=data)
 
         if response.status_code >= 300:
-            _log.error("Failed to create repository %s\n%s\n%s",
-                       repo_name, response.status_code, response.content)
+            if response.status_code < 500:
+                if any('already exists' in error['message']
+                       for error in response.json().get('errors', [])):
+                    full_name = (f"{org}/{repo_name}"
+                                 if org is not None else
+                                 f"{self.user_name}/{repo_name}")
+                    _log.info("Repository %s already exists", full_name)
+                    repo = Repo(full_name,
+                                to_repo_url(full_name),
+                                project.id)
+                    push_job_result(self.client, repo, REPO_CREATED_BEAM)
+                    return repo
+
+            _log.error("Failed to create repository %s\n%s",
+                       repo_name,
+                       response.content)
             return None
 
         response = response.json()
@@ -100,7 +125,7 @@ class ActionsThread(Thread):
             _log.error("Setting up git repository failed")
             return None
 
-        repo = Repo(full_name, repo_url, project.name)
+        repo = Repo(full_name, repo_url, project.id)
         push_job_result(self.client, repo, REPO_CREATED_BEAM)
         return repo
 
@@ -146,50 +171,55 @@ def generate_key_pair() -> (str, str):
     return pem_public_key, pem_private_key
 
 
+def to_repo_url(full_name: str) -> str:
+    return f"git@github.com:{full_name}.git"
+
+
+def run_checked_call(action: List[str], path: Path) -> bool:
+    try:
+        _log.info("Run: %s", " ".join(action))
+        check_call(action, cwd=str(path))
+    except CalledProcessError:
+        return False
+    return True
+
+
 def git_setup(name, full_name, setup_types) -> str | None:
     with TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / name
         path.mkdir()
-        abs_path = str(path.absolute())
-        try:
-            check_call(["git", "init"], cwd=abs_path)
-        except CalledProcessError:
+        abs_path = path.absolute()
+        _log.info(f"cwd: {abs_path}")
+        if not run_checked_call(["git", "init"], abs_path):
             _log.error("Failed to git init repository %s", full_name)
             return None
-
-        try:
-            check_call(["git", "branch", "-M", "main"], cwd=abs_path)
-        except CalledProcessError:
+        if not run_checked_call(["git", "branch", "-M", "main"], abs_path):
             _log.error("Failed to git set branch to main %s", full_name)
             return None
 
-        repo_url = f"git@github.com:{full_name}.git"
-        try:
-            check_call(["git", "remote", "add", "origin", repo_url],
-                       cwd=abs_path)
-        except CalledProcessError:
+        repo_url = to_repo_url(full_name)
+        if not run_checked_call(["git", "remote", "add", "origin", repo_url],
+                                abs_path):
             _log.error("Failed to git remote add origin %s", full_name)
             return None
 
         for setup_type in setup_types:
-            setup_default(path, setup_type)
+            if not setup_default(path, setup_type):
+                _log.error("Failed to setup %s", setup_type)
+                continue
 
-            try:
-                check_call(["git", "add", "."], cmd=abs_path)
-            except CalledProcessError:
+            if not run_checked_call(["git", "add", "."], abs_path):
                 _log.error("Failed to git add files %s", full_name)
-                return None
+                continue
 
-            try:
-                check_call(["git", "commit", "-m", f"INIT: {setup_type}"],
-                           cmd=abs_path)
-            except CalledProcessError:
+            if not run_checked_call(
+                    ["git", "commit", "-m", f'"INIT: {setup_type}"'],
+                    abs_path):
                 _log.error("Failed to git commit new files %s", full_name)
-                return None
+                continue
 
-        try:
-            check_call(["git", "push", "-u", "origin", "main"], cwd=abs_path)
-        except CalledProcessError:
+        if not run_checked_call(["git", "push", "-u", "origin", "main"],
+                                abs_path):
             _log.error("Failed to git push %s", full_name)
             return None
 
@@ -197,7 +227,16 @@ def git_setup(name, full_name, setup_types) -> str | None:
 
 
 def setup_default(path: Path, setup_type: str):
-    pass
+    _log.info("Setup %s", setup_type)
+    if setup_type == 'frontend':
+        return run_checked_call(
+            ["npm", "init", "vite@latest", path.name, "--",
+             "--template", "react-ts"],
+            path)
+    elif setup_type == 'backend':
+        return run_checked_call(["cargo", "init"], path)
+
+    return False
 
 
 @dataclass
