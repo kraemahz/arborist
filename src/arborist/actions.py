@@ -24,6 +24,7 @@ _log = logging.getLogger(__name__)
 
 @dataclass
 class Project:
+    id: str
     name: str
     description: str
 
@@ -52,13 +53,18 @@ class ActionsThread(Thread):
             project = Project.from_dict(next_item)
 
             repo = self.create_repo(project)
+            if repo is None:
+                continue
+
             public_key, private_key = generate_key_pair()
             self.add_deploy_key_to_repo(repo.full_name, public_key)
-            self.store_private_key(repo.full_name, private_key)
+            self.store_private_key(repo, private_key)
 
-    def store_private_key(self, full_name, private_key):
-        secret_name = "key-" + full_name.replace('/', '-')
-        new_secret = Secret(self.conf.kubernetes_namespace, secret_name)
+    def store_private_key(self, repo, private_key):
+        secret_name = "key-" + repo.full_name.replace('/', '-')
+        new_secret = Secret(self.conf.kubernetes_namespace,
+                            secret_name,
+                            repo.project_id)
         new_secret.create(data={"private-key": private_key})
         push_job_result(self.client, new_secret, SECRET_CREATED_BEAM)
 
@@ -86,9 +92,12 @@ class ActionsThread(Thread):
 
         response = response.json()
         full_name = response["full_name"]
-        self.git_setup(repo_name, full_name, setup_types)
+        repo_url = git_setup(repo_name, full_name, setup_types)
+        if repo_url is None:
+            _log.error("Setting up git repository failed")
+            return None
 
-        repo = Repo(full_name)
+        repo = Repo(full_name, repo_url, project.name)
         push_job_result(self.client, repo, REPO_CREATED_BEAM)
         return repo
 
@@ -134,7 +143,7 @@ def generate_key_pair() -> (str, str):
     return pem_public_key, pem_private_key
 
 
-def git_setup(name, full_name, setup_types):
+def git_setup(name, full_name, setup_types) -> str | None:
     with TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / name
         path.mkdir()
@@ -151,9 +160,10 @@ def git_setup(name, full_name, setup_types):
             _log.error("Failed to git set branch to main %s", full_name)
             return None
 
+        repo_url = f"git@github.com:{full_name}.git"
         try:
-            check_call(["git", "remote", "add", "origin",
-                        f"git@github.com:{full_name}.git"], cwd=abs_path)
+            check_call(["git", "remote", "add", "origin", repo_url],
+                       cwd=abs_path)
         except CalledProcessError:
             _log.error("Failed to git remote add origin %s", full_name)
             return None
@@ -180,6 +190,8 @@ def git_setup(name, full_name, setup_types):
             _log.error("Failed to git push %s", full_name)
             return None
 
+    return repo_url
+
 
 def setup_default(path: Path, setup_type: str):
     pass
@@ -188,22 +200,28 @@ def setup_default(path: Path, setup_type: str):
 @dataclass
 class Repo:
     full_name: str
+    repo_url: str
+    project_id: str
 
 
 @dataclass
 class Secret:
     namespace: str
     name: str
+    project_id: str
 
     def create(self, data: dict):
         config.load_incluster_config()
         api_instance = client.CoreV1Api()
         body = client.V1Secret(
             metadata=client.V1ObjectMeta(name=self.name),
-            string_data=data  # Data should be a dictionary with key-value pairs
+            string_data=data  # Data should be a dict with key-value pairs
         )
         try:
-            api_response = api_instance.create_namespaced_secret(self.namespace, body)
+            api_response = api_instance.create_namespaced_secret(
+                self.namespace,
+                body
+            )
             _log.info(f"Secret created. Name: {self.name}")
             return api_response
         except ApiException as e:
