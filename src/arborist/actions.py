@@ -31,7 +31,9 @@ class Project:
 
     @classmethod
     def from_dict(cls, source: Dict) -> Self:
-        return cls(source["name"], source["description"])
+        return cls(source["id"],
+                   source["name"],
+                   source["description"])
 
 
 class ActionsThread(Thread):
@@ -82,7 +84,7 @@ class ActionsThread(Thread):
 
         repo_name = to_repo_name(project.name)
         data = {"name": repo_name,
-                "description": project.description,
+                "description": project.description[:350],
                 "private": private}
         response = requests.post(url, headers=headers, json=data)
 
