@@ -6,7 +6,8 @@ from queue import Empty
 from subprocess import check_call, CalledProcessError
 from tempfile import TemporaryDirectory
 from threading import Thread
-from typing import Dict, List, Self
+from typing import Dict, List
+from typing_extensions import Self
 
 import requests
 

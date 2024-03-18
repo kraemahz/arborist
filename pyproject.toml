@@ -17,6 +17,7 @@ dependencies = [
     "kubernetes",
     "prism-client==0.2.1",
     "requests>=2.25,<3.0",
+    "typing-extensions==4.10.0"
 ]
 
 [project.scripts]
