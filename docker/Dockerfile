@@ -13,9 +13,16 @@ RUN git clone https://github.com/capnproto/capnproto.git \
     && make -j$(nproc) \
     && make install
 
+RUN curl -sL https://deb.nodesource.com/setup_12.x | bash -
+RUN apt-get install nodejs
+
 RUN mkdir /opt/arborist/
 COPY ./* /opt/arborist
 COPY ./src /opt/arborist/src
 RUN pip install /opt/arborist
+
+RUN git config --global user.name Subsequent
+RUN git config --global user.email software@subseq.io
+RUN git config --global init.defaultBranch main
 
 ENTRYPOINT ["arborist"]

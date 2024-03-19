@@ -21,7 +21,7 @@ class PrismConfig:
 
 def push_job_result(client: Client, result: Any, source: str):
     result = asdict(result)
-    json_bytes = json.dumps(result)
+    json_bytes = json.dumps(result).encode('utf-8')
     client.emit(source, json_bytes)
 
 

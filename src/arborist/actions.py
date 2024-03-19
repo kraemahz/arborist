@@ -1,10 +1,11 @@
 import logging
+import os
 
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty
-from subprocess import check_call, CalledProcessError
-from tempfile import TemporaryDirectory
+from subprocess import check_call, CalledProcessError, Popen, PIPE
+from tempfile import TemporaryDirectory, NamedTemporaryFile
 from threading import Thread
 from typing import Dict, List
 from typing_extensions import Self
@@ -14,6 +15,10 @@ import requests
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.serialization import (
+    load_pem_public_key,
+    load_pem_private_key
+)
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
@@ -36,6 +41,44 @@ class Project:
                    source["description"])
 
 
+class SSHAgent:
+    def __init__(self, private_key: str):
+        self.private_key = private_key
+        self.temp_key_path = None
+
+    def __enter__(self):
+        # Create a temporary file to hold the private key
+        temp_key_file = NamedTemporaryFile(delete=False)
+        temp_key_file.write(self.private_key_str.encode())
+        temp_key_file.close()
+        self.temp_key_path = temp_key_file.name
+
+        # Ensure the temporary private key file is only accessible by the user
+        os.chmod(self.temp_key_path, 0o600)
+
+        # Start the SSH agent
+        agent_process = Popen(['ssh-agent', '-s'],
+                              stdout=PIPE,
+                              stderr=PIPE,
+                              text=True)
+        agent_output, _ = agent_process.communicate()
+        os.environ['SSH_AUTH_SOCK'] = agent_output.split(';')[0].split('=')[1]
+        os.environ['SSH_AGENT_PID'] = agent_output.split(';')[2].split('=')[1]
+
+        # Add the private key to the agent
+        check_call(['ssh-add', self.temp_key_path])
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Remove the private key from the agent
+        check_call(['ssh-add', '-d', self.temp_key_path])
+        # Kill the SSH agent
+        check_call(['ssh-agent', '-k'])
+        # Remove the temporary file
+        os.remove(self.temp_key_path)
+
+
 class ActionsThread(Thread):
 
     def __init__(self, client, queue, token, conf):
@@ -55,13 +98,12 @@ class ActionsThread(Thread):
                 continue
 
             project = Project.from_dict(next_item)
+            public_key, private_key = generate_key_pair()
 
-            repo = self.create_repo(project)
+            repo = self.create_repo(project, public_key, private_key)
             if repo is None:
                 continue
 
-            public_key, private_key = generate_key_pair()
-            self.add_deploy_key_to_repo(repo.full_name, public_key)
             self.store_private_key(repo, private_key)
 
     def store_private_key(self, repo, private_key):
@@ -69,6 +111,8 @@ class ActionsThread(Thread):
         new_secret = Secret(self.conf.kubernetes_namespace,
                             secret_name,
                             repo.project_id)
+        config.load_incluster_config()
+        private_key = convert_pem_private_to_openssh(private_key)
         new_secret.create(data={"private-key": private_key})
         push_job_result(self.client, new_secret, SECRET_CREATED_BEAM)
 
@@ -82,7 +126,10 @@ class ActionsThread(Thread):
         response.raise_for_status()
         return response.json().get('name')
 
-    def create_repo(self, project: Project) -> Dict:
+    def create_repo(self,
+                    project: Project,
+                    public_key: str,
+                    private_key: str) -> Dict:
         private = self.conf.private
         org = self.conf.org
         setup_types = ([] if self.conf.setup_types is None
@@ -111,6 +158,7 @@ class ActionsThread(Thread):
                                 to_repo_url(full_name),
                                 project.id)
                     push_job_result(self.client, repo, REPO_CREATED_BEAM)
+                    self.add_deploy_key_to_repo(full_name, public_key)
                     return repo
 
             _log.error("Failed to create repository %s\n%s",
@@ -120,7 +168,11 @@ class ActionsThread(Thread):
 
         response = response.json()
         full_name = response["full_name"]
-        repo_url = git_setup(repo_name, full_name, setup_types)
+        self.add_deploy_key_to_repo(full_name, public_key)
+
+        with SSHAgent(private_key):
+            repo_url = git_setup(repo_name, full_name, setup_types)
+
         if repo_url is None:
             _log.error("Setting up git repository failed")
             return None
@@ -130,18 +182,56 @@ class ActionsThread(Thread):
         return repo
 
     def add_deploy_key_to_repo(self, full_name: str, public_key: str) -> Dict:
-        url = f"https://api.github.com/repos/{full_name}/keys"
-        headers = {"Authorization": f"token {self.token}",
-                   "Accept": "application/vnd.github.v3+json"}
-        data = {"title": self.conf.key_title,
-                "key": public_key,
-                "read_only": False}
-        response = requests.post(url, headers=headers, json=data)
-        return response.json()
+        public_key = convert_pem_to_openssh(public_key)
+        return add_deploy_key(full_name,
+                              self.conf.key_title,
+                              public_key,
+                              self.token)
 
 
 def to_repo_name(name: str) -> str:
     return name.lower().replace(" ", "_")
+
+
+def add_deploy_key(full_name: str,
+                   key_title: str,
+                   public_key: str,
+                   token: str):
+    url = f"https://api.github.com/repos/{full_name}/keys"
+    headers = {"Authorization": f"token {token}",
+               "Accept": "application/vnd.github.v3+json"}
+    data = {"title": key_title,
+            "key": public_key,
+            "read_only": False}
+    response = requests.post(url, headers=headers, json=data)
+    return response.json()
+
+
+def convert_pem_to_openssh(pem_key: str) -> str:
+    # Load the PEM public key
+    public_key = load_pem_public_key(pem_key.encode(),
+                                     backend=default_backend())
+    # Convert to OpenSSH format
+    openssh_key = public_key.public_bytes(
+        encoding=serialization.Encoding.OpenSSH,
+        format=serialization.PublicFormat.OpenSSH
+    )
+    return openssh_key.decode()
+
+
+def convert_pem_private_to_openssh(pem_key: str) -> str:
+    # Load the PEM private key
+    private_key = load_pem_private_key(pem_key.encode(),
+                                       password=None,
+                                       backend=default_backend())
+
+    # Convert to OpenSSH format
+    openssh_key = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
+    )
+    return openssh_key.decode()
 
 
 def generate_key_pair() -> (str, str):
@@ -184,7 +274,8 @@ def run_checked_call(action: List[str], path: Path) -> bool:
     return True
 
 
-def git_setup(name, full_name, setup_types) -> str | None:
+def git_setup(name, full_name, setup_types, private_key) -> str | None:
+
     with TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / name
         path.mkdir()
@@ -192,9 +283,6 @@ def git_setup(name, full_name, setup_types) -> str | None:
         _log.info(f"cwd: {abs_path}")
         if not run_checked_call(["git", "init"], abs_path):
             _log.error("Failed to git init repository %s", full_name)
-            return None
-        if not run_checked_call(["git", "branch", "-M", "main"], abs_path):
-            _log.error("Failed to git set branch to main %s", full_name)
             return None
 
         repo_url = to_repo_url(full_name)
@@ -228,12 +316,12 @@ def git_setup(name, full_name, setup_types) -> str | None:
 
 def setup_default(path: Path, setup_type: str):
     _log.info("Setup %s", setup_type)
-    if setup_type == 'frontend':
+    if setup_type == 'react-ts':
         return run_checked_call(
             ["npm", "init", "vite@latest", path.name, "--",
              "--template", "react-ts"],
             path)
-    elif setup_type == 'backend':
+    elif setup_type == 'rust':
         return run_checked_call(["cargo", "init"], path)
 
     return False
@@ -253,7 +341,6 @@ class Secret:
     project_id: str
 
     def create(self, data: dict):
-        config.load_incluster_config()
         api_instance = client.CoreV1Api()
         body = client.V1Secret(
             metadata=client.V1ObjectMeta(name=self.name),
