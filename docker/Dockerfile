@@ -13,8 +13,8 @@ RUN git clone https://github.com/capnproto/capnproto.git \
     && make -j$(nproc) \
     && make install
 
-RUN curl -sL https://deb.nodesource.com/setup_12.x | bash -
-RUN apt-get install nodejs
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+RUN apt-get update && apt-get install -y nodejs openssh-client
 
 RUN mkdir /opt/arborist/
 COPY ./* /opt/arborist

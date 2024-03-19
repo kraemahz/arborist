@@ -49,7 +49,7 @@ class SSHAgent:
     def __enter__(self):
         # Create a temporary file to hold the private key
         temp_key_file = NamedTemporaryFile(delete=False)
-        temp_key_file.write(self.private_key_str.encode())
+        temp_key_file.write(self.private_key.encode())
         temp_key_file.close()
         self.temp_key_path = temp_key_file.name
 
@@ -71,8 +71,6 @@ class SSHAgent:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # Remove the private key from the agent
-        check_call(['ssh-add', '-d', self.temp_key_path])
         # Kill the SSH agent
         check_call(['ssh-agent', '-k'])
         # Remove the temporary file
@@ -107,7 +105,7 @@ class ActionsThread(Thread):
             self.store_private_key(repo, private_key)
 
     def store_private_key(self, repo, private_key):
-        secret_name = "key-" + repo.full_name.replace('/', '-')
+        secret_name = repo.full_name.replace('/', '-') + "-private-key"
         new_secret = Secret(self.conf.kubernetes_namespace,
                             secret_name,
                             repo.project_id)
@@ -124,7 +122,7 @@ class ActionsThread(Thread):
         }
         response = requests.get(url, headers=headers)
         response.raise_for_status()
-        return response.json().get('name')
+        return response.json().get('login')
 
     def create_repo(self,
                     project: Project,
@@ -145,6 +143,7 @@ class ActionsThread(Thread):
                 "description": project.description[:350],
                 "private": private}
         response = requests.post(url, headers=headers, json=data)
+        private_key = convert_pem_private_to_openssh(private_key)
 
         if response.status_code >= 300:
             if response.status_code < 500:
@@ -274,7 +273,7 @@ def run_checked_call(action: List[str], path: Path) -> bool:
     return True
 
 
-def git_setup(name, full_name, setup_types, private_key) -> str | None:
+def git_setup(name, full_name, setup_types) -> str | None:
 
     with TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / name
@@ -318,7 +317,7 @@ def setup_default(path: Path, setup_type: str):
     _log.info("Setup %s", setup_type)
     if setup_type == 'react-ts':
         return run_checked_call(
-            ["npm", "init", "vite@latest", path.name, "--",
+            ["npm", "-y", "init", "vite@latest", path.name, "--",
              "--template", "react-ts"],
             path)
     elif setup_type == 'rust':
