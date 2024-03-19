@@ -19,6 +19,9 @@ RUN git clone https://github.com/capnproto/capnproto.git \
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
 RUN apt-get update && apt-get install -y nodejs openssh-client
 
+# Install snek
+RUN pip install snekpy
+
 RUN mkdir /opt/arborist/
 COPY ./* /opt/arborist
 COPY ./src /opt/arborist/src

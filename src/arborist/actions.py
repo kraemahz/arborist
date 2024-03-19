@@ -322,6 +322,8 @@ def setup_default(path: Path, setup_type: str):
             path)
     elif setup_type == 'rust':
         return run_checked_call(["cargo", "init"], path)
+    elif setup_type == 'python':
+        return run_checked_call(["snek", "init", "--force"], path)
 
     return False
 
