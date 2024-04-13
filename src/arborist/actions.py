@@ -33,12 +33,23 @@ class Project:
     id: str
     name: str
     description: str
+    repo: str | None
+    tracker: str | None
 
     @classmethod
     def from_dict(cls, source: Dict) -> Self:
         return cls(source["id"],
                    source["name"],
-                   source["description"])
+                   source["description"],
+                   source.get("repo"),
+                   source.get("tracker"))
+
+
+@dataclass
+class Repo:
+    full_name: str
+    repo_url: str
+    project_id: str
 
 
 class SSHAgent:
@@ -98,11 +109,27 @@ class ActionsThread(Thread):
             project = Project.from_dict(next_item)
             public_key, private_key = generate_key_pair()
 
-            repo = self.create_repo(project, public_key, private_key)
+            if project.repo is not None:
+                _log.info("Project %s already has a repository", project.name)
+                repo = self.update_existing_repo(project, public_key)
+            else:
+                repo = self.create_repo(project, public_key, private_key)
+
             if repo is None:
                 continue
 
             self.store_private_key(repo, private_key)
+
+    def update_existing_repo(self, project, public_key) -> Repo | None:
+        full_name = extract_full_name(project.repo)
+        if 'github.com' not in project.repo:
+            _log.error("Repository URL %s is not a GitHub repository, can't proceed",
+                       project.repo)
+            return
+        self.add_deploy_key_to_repo(full_name, public_key)
+        repo = Repo(full_name, project.repo, project.id)
+        push_job_result(self.client, repo, REPO_CREATED_BEAM)
+        return repo
 
     def store_private_key(self, repo, private_key):
         secret_name = repo.full_name.replace('/', '-') + "-private-key"
@@ -127,7 +154,7 @@ class ActionsThread(Thread):
     def create_repo(self,
                     project: Project,
                     public_key: str,
-                    private_key: str) -> Dict:
+                    private_key: str) -> Repo | None:
         private = self.conf.private
         org = self.conf.org
         setup_types = ([] if self.conf.setup_types is None
@@ -153,9 +180,7 @@ class ActionsThread(Thread):
                                  if org is not None else
                                  f"{self.user_name}/{repo_name}")
                     _log.info("Repository %s already exists", full_name)
-                    repo = Repo(full_name,
-                                to_repo_url(full_name),
-                                project.id)
+                    repo = Repo(full_name, to_repo_url(full_name), project.id)
                     push_job_result(self.client, repo, REPO_CREATED_BEAM)
                     self.add_deploy_key_to_repo(full_name, public_key)
                     return repo
@@ -190,6 +215,13 @@ class ActionsThread(Thread):
 
 def to_repo_name(name: str) -> str:
     return name.lower().replace(" ", "_")
+
+
+def extract_full_name(repo_url: str) -> str:
+    """Extract the full name of a repository from its URL."""
+    part_after_domain = repo_url.split(':')[-1]
+    org_repo = part_after_domain.replace('.git', '')
+    return org_repo
 
 
 def add_deploy_key(full_name: str,
@@ -326,13 +358,6 @@ def setup_default(path: Path, setup_type: str):
         return run_checked_call(["snek", "init", "--force"], path)
 
     return False
-
-
-@dataclass
-class Repo:
-    full_name: str
-    repo_url: str
-    project_id: str
 
 
 @dataclass
