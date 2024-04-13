@@ -100,6 +100,7 @@ class ActionsThread(Thread):
         self.running = True
 
     def run(self):
+        _log.info("Actions thread started")
         while self.running:
             try:
                 next_item = self.queue.get(timeout=QUEUE_GET_TIMEOUT)
