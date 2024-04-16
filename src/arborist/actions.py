@@ -114,6 +114,7 @@ class ActionsThread(Thread):
                 _log.info("Project %s already has a repository", project.name)
                 repo = self.update_existing_repo(project, public_key)
             else:
+                _log.info("Project %s will create a repository", project.name)
                 repo = self.create_repo(project, public_key, private_key)
 
             if repo is None:
